@@ -36,13 +36,29 @@
 #define txPin 3
 
 // Create a software serial object for the connection to the RFID reader module
-SoftwareSerial rfid = SoftwareSerial(rxPin, txPin);
+SoftwareSerial rfid = SoftwareSerial( rxPin, txPin );
 
 // Set up outputs
-#define strikerPlate 12
-#define ledPin 13
+#define strikerPlate 12  // Pin connected to door lock
+#define ledPin 13        // LED status output
+#define unlockSeconds 2  // Seconds to hold door lock open
 
-byte allowedTag[5] = {0x01, 0x04, 0xF5, 0xB5, 0x21};
+// The tag database consists of two parts. The first part is an array of
+// tag values, with each tag taking up 5 bytes. The second is a list of
+// names with one for each group of 5 bytes.
+byte allowedTag[10] = {
+  0x01, 0x04, 0xF5, 0xB5, 0x22,   // Tag 1
+  0x04, 0x14, 0x6E, 0x8B, 0xDD,   // Tag 2
+};
+
+// List of names to associate with the tag IDs
+char* tagName[] = {
+  "Jonathan Oxer",                // Tag 1
+  "Michael Oxer",                 // Tag 2
+};
+
+// Specify the number of tags defined
+#define MAX_NO_CARDS 2
 
 int incomingByte = 0;    // To store incoming serial data
 
@@ -57,25 +73,23 @@ void setup() {
   Serial.println("RFID reader starting up");
 }
 
-
 /**
  * Loop
  */
 void loop() {
-  byte i             = 0;
-  byte authorizedTag = 0;
-  byte val           = 0;
-  byte checksum      = 0;
-  byte bytesread     = 0;
-  byte tempbyte      = 0;
+  byte i         = 0;
+  byte val       = 0;
+  byte checksum  = 0;
+  byte bytesRead = 0;
+  byte tempByte  = 0;
   byte tagValue[6];    // Tags are only 5 bytes but we need an extra byte for the checksum
 
   // Read from the RFID module. Because this connection uses SoftwareSerial
   // there is no equivalent to the Serial.available() function, so at this
   // point the program blocks while waiting for a value from the module
   if((val = rfid.read()) == 2) {        // Check for header
-    bytesread = 0;
-    while (bytesread < 12) {            // Read 10 digit code + 2 digit checksum
+    bytesRead = 0;
+    while (bytesRead < 12) {            // Read 10 digit code + 2 digit checksum
       val = rfid.read();
       if((val == 0x0D)||(val == 0x0A)||(val == 0x03)||(val == 0x02)) { // if header or stop bytes before the 10 digit reading 
         break;                          // Stop reading
@@ -90,83 +104,87 @@ void loop() {
       }
 
       // Every two hex-digits, add byte to code:
-      if (bytesread & 1 == 1) {
-        // make some space for this hex-digit by
-        // shifting the previous digit 4 bits to the left:
-        tagValue[bytesread >> 1] = (val | (tempbyte << 4));
+      if (bytesRead & 1 == 1) {
+        // Make space for this hex-digit by shifting the previous digit 4 bits to the left
+        tagValue[bytesRead >> 1] = (val | (tempByte << 4));
 
-        if (bytesread >> 1 != 5) {                // If we're at the checksum byte,
-          checksum ^= tagValue[bytesread >> 1];       // Calculate the checksum... (XOR)
+        if (bytesRead >> 1 != 5) {                // If we're at the checksum byte,
+          checksum ^= tagValue[bytesRead >> 1];   // Calculate the checksum... (XOR)
         };
-      }
-      else {
-        tempbyte = val;                           // Store the first hex digit first...
+      } else {
+        tempByte = val;                           // Store the first hex digit first
       };
 
-      bytesread++;                                // ready to read next digit
+      bytesRead++;                                // Ready to read next digit
     }
 
     // Send the result to the host connected via USB
-    if (bytesread == 12) {                        // if 12 digit read is complete
-      if(tagValue[0] == allowedTag[0]
-        && tagValue[1] == allowedTag[1]
-        && tagValue[2] == allowedTag[2]
-        && tagValue[3] == allowedTag[3]
-        && tagValue[4] == allowedTag[4]
-        )
-      {
-        authorizedTag = 1;
-      } else {
-        authorizedTag = 0;
-      }
-
+    if (bytesRead == 12) {                        // 12 digit read is complete
 
       Serial.print("Tag read: ");
       for (i=0; i<5; i++) {
         // Add a leading 0 to pad out values below 16
-        if (tagValue[i] < 16){
+        if (tagValue[i] < 16) {
           Serial.print("0");
         }
         Serial.print(tagValue[i], HEX);
-        //Serial.print(" ");
       }
       Serial.println();
 
       Serial.print("Checksum: ");
       Serial.print(tagValue[5], HEX);
       Serial.println(tagValue[5] == checksum ? " -- passed." : " -- error.");
-      Serial.println();
 
+      // Search the tag database for this particular tag
+      int tagId = findTag(tagValue[0], tagValue[1], tagValue[2], tagValue[3], tagValue[4]);
+      
       // Only fire the striker plate if this tag was authorized
-      if( authorizedTag == 1)
+      if( tagId > 0 )
       {
-        Serial.println("Authorized tag: unlocking");
-        unlock();
+        Serial.print("Authorized tag ID ");
+        Serial.print(tagId);
+        Serial.print(": unlocking for ");
+        Serial.println(tagName[tagId - 1]);   // Get the name for this tag from the database
+        unlock();                             // Fire the striker plate to open the lock
       } else {
         Serial.println("Tag not authorized");
       }
+      Serial.println();     // Blank separator line in output
     }
 
-    bytesread = 0;
+    bytesRead = 0;
   }
-  //toggle(13);
 }
 
 /**
- */
-void toggle(int pinNum) {
-  digitalWrite(pinNum, !digitalRead(pinNum));
-}
-
-
-/**
- * Fire the relay to activate the striker plate for one second
+ * Fire the relay to activate the striker plate for the configured
+ * number of seconds.
  */
 void unlock() {
   digitalWrite(ledPin, HIGH);
   digitalWrite(strikerPlate, HIGH);
-  delay(1000);
+  delay(unlockSeconds * 1000);
   digitalWrite(strikerPlate, LOW);
   digitalWrite(ledPin, LOW);
 }
 
+/**
+ * Search for tag in the database
+ */
+int findTag(byte byte0, byte byte1, byte byte2, byte byte3, byte byte4) {
+  for (int thisCard = 0; thisCard < MAX_NO_CARDS; thisCard++) {
+    // Check if all five bytes match this row in the tag database
+    if(byte0 == allowedTag[(thisCard*5) + 0]
+    && byte1 == allowedTag[(thisCard*5) + 1]
+    && byte2 == allowedTag[(thisCard*5) + 2]
+    && byte3 == allowedTag[(thisCard*5) + 3]
+    && byte4 == allowedTag[(thisCard*5) + 4])
+    {
+      // The row in the database starts at 0, so add 1 to the result so
+      // that the card ID starts from 1 instead (0 represents "no match")
+      return(thisCard + 1);
+    }
+  }
+  // If we don't find the tag return 0 to show it was invalid:
+  return(0);
+}
