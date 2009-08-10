@@ -1,88 +1,90 @@
 /**
- * Some of this code is derived from Tom Igoe's excellent RFID project on his blog
+ * RFID Access Control Single
+ *
+ * This project implements a simple stand-alone RFID access control
+ * system that can operate independently of a host computer or any
+ * other device. It uses an ID-12 RFID reader module from ID
+ * Innovations to scan for 125KHz "Unique" RFID tags, and when a
+ * recognised tag is identified it toggles an output for 1 second.
+ * The output can then be used to control a relay to trip an electric
+ * striker plate to release a door lock.
+ *
+ * Because this project is intended to provide a minimal working system
+ * it does not have any provision for database updates to be managed
+ * externally from a host, so updates to the accepted cards must be
+ * made by changing the values in the code, recompiling the program,
+ * and re-uploading it to the Arduino. It does however report card
+ * readings (both successful and unsuccessful) via the serial
+ * connection so you can monitor the system using a connected computer.
+ *
+ * Some of this code is derived from Tom Igoe's excellent RFID tutorial
+ * which is detailed on his blog at:
+ *   http://www.tigoe.net/pcomp/code/category/PHP/347
+ *
+ * Copyright Jonathan Oxer <jon@oxer.com.au>
+ * http://www.practicalarduino.com/
  */
 
-// Set up the serial connection to the RFID reader module
+// Set up the serial connection to the RFID reader module. The module's
+// TX pin needs to be connected to RX (pin 2) on the Arduino. Module
+// RX doesn't need to be connected to anything since we won't send
+// commands to it, but SoftwareSerial requires us to define a pin for
+// TX anyway so you can either connect module RX to Arduino TX or just
+// leave them disconnected.
 #include <SoftwareSerial.h>
 #define rxPin 2
 #define txPin 3
+
 // Create a software serial object for the connection to the RFID reader module
 SoftwareSerial rfid = SoftwareSerial(rxPin, txPin);
 
-
-// Set up the storage area for tags
-#include <EEPROM.h>
-#define MAX_NO_CARDS 102
-
 // Set up outputs
+#define strikerPlate 12
 #define ledPin 13
-#define strikerPlate 13
 
 byte allowedTag[5] = {0x01, 0x04, 0xF5, 0xB5, 0x21};
 
-int incomingByte = 0;	// for incoming serial data
+int incomingByte = 0;    // To store incoming serial data
 
 /**
  * Setup
  */
 void setup() {
   pinMode(ledPin, OUTPUT);
-  Serial.begin(38400);   // Port for connection to host
-  rfid.begin(9600);      // Port for connection to RFID
+  Serial.begin(38400);   // Serial port for connection to host
+  rfid.begin(9600);      // Serial port for connection to RFID module
 
   Serial.println("RFID reader starting up");
-  // print user instructions serially:
-  Serial.println("n - add card to database");
-  Serial.println("c - clear entire database");
-  Serial.println("d - delete card from database");
-  Serial.println("p - print database"); 
 }
+
 
 /**
  * Loop
  */
 void loop() {
-  byte i = 0;
-  byte val = 0;
-  byte tagValue[6];  // Only a 5-byte tag value, but we need an extra byte for the checksum
-  byte checksum = 0;
-  byte bytesread = 0;
-  byte tempbyte = 0;
-  
-  
-  if (Serial.available() > 0) {
-    // read the latest byte:
-    char incomingByte = Serial.read();
-    switch (incomingByte) {
-    //case 'n':            // if user enters 'n' then store tag number
-    //  seekNewTag();
-    //  break;
-    case 'c':
-      clearEeprom();    // if user enters 'c' then erase database
-      Serial.println("Database deleted");
-      break;
-    //case 'd':           // if user enters 'd' then delete the last tag
-    //  seekAndDeleteTag();
-    //  break;
-    case'p':            // if user enters 'p' then print the database
-      printTags();
-      break;
-    }
-  }
+  byte i             = 0;
+  byte authorizedTag = 0;
+  byte val           = 0;
+  byte checksum      = 0;
+  byte bytesread     = 0;
+  byte tempbyte      = 0;
+  byte tagValue[6];    // Tags are only 5 bytes but we need an extra byte for the checksum
 
-
-  if((val = rfid.read()) == 2) {        // check for header 
+  // Read from the RFID module. Because this connection uses SoftwareSerial
+  // there is no equivalent to the Serial.available() function, so at this
+  // point the program blocks while waiting for a value from the module
+  if((val = rfid.read()) == 2) {        // Check for header
     bytesread = 0;
-    while (bytesread < 12) {            // read 10 digit code + 2 digit checksum
+    while (bytesread < 12) {            // Read 10 digit code + 2 digit checksum
       val = rfid.read();
       if((val == 0x0D)||(val == 0x0A)||(val == 0x03)||(val == 0x02)) { // if header or stop bytes before the 10 digit reading 
-        break;                          // stop reading
+        break;                          // Stop reading
       }
 
-      // Do Ascii/Hex conversion:
+      // Ascii/Hex conversion:
       if ((val >= '0') && (val <= '9')) {
         val = val - '0';
-      } 
+      }
       else if ((val >= 'A') && (val <= 'F')) {
         val = 10 + val - 'A';
       }
@@ -90,13 +92,13 @@ void loop() {
       // Every two hex-digits, add byte to code:
       if (bytesread & 1 == 1) {
         // make some space for this hex-digit by
-        // shifting the previous hex-digit with 4 bits to the left:
+        // shifting the previous digit 4 bits to the left:
         tagValue[bytesread >> 1] = (val | (tempbyte << 4));
 
         if (bytesread >> 1 != 5) {                // If we're at the checksum byte,
           checksum ^= tagValue[bytesread >> 1];       // Calculate the checksum... (XOR)
         };
-      } 
+      }
       else {
         tempbyte = val;                           // Store the first hex digit first...
       };
@@ -104,9 +106,22 @@ void loop() {
       bytesread++;                                // ready to read next digit
     }
 
-    // Output to Serial:
+    // Send the result to the host connected via USB
     if (bytesread == 12) {                        // if 12 digit read is complete
-      Serial.print("Tag value: ");
+      if(tagValue[0] == allowedTag[0]
+        && tagValue[1] == allowedTag[1]
+        && tagValue[2] == allowedTag[2]
+        && tagValue[3] == allowedTag[3]
+        && tagValue[4] == allowedTag[4]
+        )
+      {
+        authorizedTag = 1;
+      } else {
+        authorizedTag = 0;
+      }
+
+
+      Serial.print("Tag read: ");
       for (i=0; i<5; i++) {
         // Add a leading 0 to pad out values below 16
         if (tagValue[i] < 16){
@@ -121,19 +136,15 @@ void loop() {
       Serial.print(tagValue[5], HEX);
       Serial.println(tagValue[5] == checksum ? " -- passed." : " -- error.");
       Serial.println();
-    }
 
-    if(tagValue[0] == allowedTag[0]
-      && tagValue[1] == allowedTag[1]
-      && tagValue[2] == allowedTag[2]
-      && tagValue[3] == allowedTag[3]
-      && tagValue[4] == allowedTag[4]
-      )
-    {
-      Serial.println("Allowed tag, unlocking");
-      unlock();
-    } else {
-      Serial.println("Tag value not recognised");
+      // Only fire the striker plate if this tag was authorized
+      if( authorizedTag == 1)
+      {
+        Serial.println("Authorized tag: unlocking");
+        unlock();
+      } else {
+        Serial.println("Tag not authorized");
+      }
     }
 
     bytesread = 0;
@@ -144,7 +155,7 @@ void loop() {
 /**
  */
 void toggle(int pinNum) {
-  digitalWrite(pinNum, !digitalRead(pinNum)); 
+  digitalWrite(pinNum, !digitalRead(pinNum));
 }
 
 
@@ -152,88 +163,10 @@ void toggle(int pinNum) {
  * Fire the relay to activate the striker plate for one second
  */
 void unlock() {
+  digitalWrite(ledPin, HIGH);
   digitalWrite(strikerPlate, HIGH);
   delay(1000);
   digitalWrite(strikerPlate, LOW);
+  digitalWrite(ledPin, LOW);
 }
 
-
-/**
- * Reset the entire EEPROM to 0 values
- */
-void clearEeprom()
-{
-  // write a 0 to all 512 bytes of the EEPROM
-  for (int i = 0; i < 512; i++)
-    EEPROM.write(i, 0);
-}
-
-void readEeprom()
-{
-  int address = 0;
-  byte value;
-  // read a byte from the current address of the EEPROM
-  value = EEPROM.read(address);
-  
-  Serial.print(address);
-  Serial.print("\t");
-  Serial.print(value, DEC);
-  Serial.println();
-  
-  // advance to the next address of the EEPROM
-  address = address + 1;
-  
-  // there are only 512 bytes of EEPROM, from 0 to 511, so if we're
-  // on address 512, wrap around to address 0
-  if (address == 512)
-    address = 0;
-    
-  delay(500);
-}
-
-void writeEeprom( byte val )
-{
-  int addr = 0;
-  // write the value to the appropriate byte of the EEPROM.
-  // these values will remain there when the board is
-  // turned off.
-  EEPROM.write(addr, val);
-  
-  // advance to the next address.  there are 512 bytes in 
-  // the EEPROM, so go back to 0 when we hit 512.
-  addr = addr + 1;
-  if (addr == 512)
-    addr = 0;
-  
-  delay(100);
-}
-
-
-/**
- * print the entire database
- */
-void printTags(){
-  for (int thisTag = 0; thisTag< MAX_NO_CARDS; thisTag++){
-    printOneTag(thisTag);
-  }
-}
-
-/**
- * Print a single tag given the tag's address:
- */
-void printOneTag(int address) {
-  Serial.print(address);
-  Serial.print(":");
-  for (int offset = 1; offset < 5; offset++) {
-    int thisByte = int(EEPROM.read(address*5+offset));
-    // if the byte is less than 16, i.e. only one hex character
-    // add a leading 0:
-    if (thisByte < 0x10) {
-      Serial.print("0");
-    }
-    // print the value:
-    Serial.print(thisByte,HEX);
-  }
-  // add a final linefeed and carriage return:
-  Serial.println();
-}
