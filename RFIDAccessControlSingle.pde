@@ -1,13 +1,14 @@
 /**
  * RFID Access Control Single
  *
- * This project implements a simple stand-alone RFID access control
+ * This project implements a single stand-alone RFID access control
  * system that can operate independently of a host computer or any
  * other device. It uses an ID-12 RFID reader module from ID
  * Innovations to scan for 125KHz "Unique" RFID tags, and when a
- * recognised tag is identified it toggles an output for 1 second.
- * The output can then be used to control a relay to trip an electric
- * striker plate to release a door lock.
+ * recognised tag is identified it toggles an output for a configurable
+ * duration, typically 2 seconds. The output can then be used to
+ * control a relay to trip an electric striker plate to release a door
+ * lock.
  *
  * Because this project is intended to provide a minimal working system
  * it does not have any provision for database updates to be managed
@@ -17,12 +18,14 @@
  * readings (both successful and unsuccessful) via the serial
  * connection so you can monitor the system using a connected computer.
  *
- * Some of this code is derived from Tom Igoe's excellent RFID tutorial
+ * Some of this code was inspired by Tom Igoe's excellent RFID tutorial
  * which is detailed on his blog at:
  *   http://www.tigoe.net/pcomp/code/category/PHP/347
+ * And also from the ID-12 example code on the Arduino Playground at:
+ *   http://www.arduino.cc/playground/Code/ID12
  *
  * Copyright Jonathan Oxer <jon@oxer.com.au>
- * http://www.practicalarduino.com/
+ * http://www.practicalarduino.com/projects/medium/rfid-access-control
  */
 
 // Set up the serial connection to the RFID reader module. The module's
@@ -35,30 +38,37 @@
 #define rxPin 2
 #define txPin 3
 
-// Create a software serial object for the connection to the RFID reader module
+// Create a software serial object for the connection to the RFID module
 SoftwareSerial rfid = SoftwareSerial( rxPin, txPin );
 
 // Set up outputs
-#define strikerPlate 12  // Pin connected to door lock
+#define strikerPlate 12  // Output pin connected to door lock
 #define ledPin 13        // LED status output
 #define unlockSeconds 2  // Seconds to hold door lock open
 
 // The tag database consists of two parts. The first part is an array of
-// tag values, with each tag taking up 5 bytes. The second is a list of
-// names with one for each group of 5 bytes.
-byte allowedTag[10] = {
+// tag values with each tag taking up 5 bytes. The second is a list of
+// names with one name for each tag (ie: group of 5 bytes).
+/*byte allowedTag[10] = {
   0x01, 0x04, 0xF5, 0xB5, 0x22,   // Tag 1
   0x04, 0x14, 0x6E, 0x8B, 0xDD,   // Tag 2
+};*/
+
+char* allowedTags[] = {
+  "0104F5B522",         // Tag 1
+  "04146E8BDE",         // Tag 2
+  "0413BBBF22",         // Tag 3
 };
 
-// List of names to associate with the tag IDs
+// List of names to associate with the matching tag IDs
 char* tagName[] = {
-  "Jonathan Oxer",                // Tag 1
-  "Michael Oxer",                 // Tag 2
+  "Jonathan Oxer",      // Tag 1
+  "Michael Oxer",       // Tag 2
+  "Dog Implant",        // Tag 3
 };
 
-// Specify the number of tags defined
-#define MAX_NO_CARDS 2
+// Check the number of tags defined
+int numberOfTags = sizeof(allowedTags)/sizeof(allowedTags[0]);
 
 int incomingByte = 0;    // To store incoming serial data
 
@@ -82,7 +92,8 @@ void loop() {
   byte checksum  = 0;
   byte bytesRead = 0;
   byte tempByte  = 0;
-  byte tagValue[6];    // Tags are only 5 bytes but we need an extra byte for the checksum
+  byte tagBytes[6];    // "Unique" tags are only 5 bytes but we need an extra byte for the checksum
+  char tagValue[10];
 
   // Read from the RFID module. Because this connection uses SoftwareSerial
   // there is no equivalent to the Serial.available() function, so at this
@@ -91,7 +102,15 @@ void loop() {
     bytesRead = 0;
     while (bytesRead < 12) {            // Read 10 digit code + 2 digit checksum
       val = rfid.read();
-      if((val == 0x0D)||(val == 0x0A)||(val == 0x03)||(val == 0x02)) { // if header or stop bytes before the 10 digit reading 
+
+      // Append the first 10 bytes (0 to 9) to the raw tag value
+      if (bytesRead < 10)
+      {
+        tagValue[bytesRead] = val;
+      }
+
+      // Check if this is a header or stop byte before the 10 digit reading is complete
+      if((val == 0x0D)||(val == 0x0A)||(val == 0x03)||(val == 0x02)) {
         break;                          // Stop reading
       }
 
@@ -103,13 +122,13 @@ void loop() {
         val = 10 + val - 'A';
       }
 
-      // Every two hex-digits, add byte to code:
+      // Every two hex-digits, add a byte to the code:
       if (bytesRead & 1 == 1) {
         // Make space for this hex-digit by shifting the previous digit 4 bits to the left
-        tagValue[bytesRead >> 1] = (val | (tempByte << 4));
+        tagBytes[bytesRead >> 1] = (val | (tempByte << 4));
 
         if (bytesRead >> 1 != 5) {                // If we're at the checksum byte,
-          checksum ^= tagValue[bytesRead >> 1];   // Calculate the checksum... (XOR)
+          checksum ^= tagBytes[bytesRead >> 1];   // Calculate the checksum... (XOR)
         };
       } else {
         tempByte = val;                           // Store the first hex digit first
@@ -120,25 +139,30 @@ void loop() {
 
     // Send the result to the host connected via USB
     if (bytesRead == 12) {                        // 12 digit read is complete
+      tagValue[10] = '\0';                        // Null-terminate the string
 
       Serial.print("Tag read: ");
       for (i=0; i<5; i++) {
         // Add a leading 0 to pad out values below 16
-        if (tagValue[i] < 16) {
+        if (tagBytes[i] < 16) {
           Serial.print("0");
         }
-        Serial.print(tagValue[i], HEX);
+        Serial.print(tagBytes[i], HEX);
       }
       Serial.println();
 
       Serial.print("Checksum: ");
-      Serial.print(tagValue[5], HEX);
-      Serial.println(tagValue[5] == checksum ? " -- passed." : " -- error.");
+      Serial.print(tagBytes[5], HEX);
+      Serial.println(tagBytes[5] == checksum ? " -- passed." : " -- error.");
+
+      // Show the raw tag value
+      //Serial.print("VALUE: ");
+      //Serial.println(tagValue);
 
       // Search the tag database for this particular tag
-      int tagId = findTag(tagValue[0], tagValue[1], tagValue[2], tagValue[3], tagValue[4]);
-      
-      // Only fire the striker plate if this tag was authorized
+      int tagId = findTag( tagValue );
+
+      // Only fire the striker plate if this tag was found in the database
       if( tagId > 0 )
       {
         Serial.print("Authorized tag ID ");
@@ -169,22 +193,18 @@ void unlock() {
 }
 
 /**
- * Search for tag in the database
+ * Search for a specific tag in the database
  */
-int findTag(byte byte0, byte byte1, byte byte2, byte byte3, byte byte4) {
-  for (int thisCard = 0; thisCard < MAX_NO_CARDS; thisCard++) {
-    // Check if all five bytes match this row in the tag database
-    if(byte0 == allowedTag[(thisCard*5) + 0]
-    && byte1 == allowedTag[(thisCard*5) + 1]
-    && byte2 == allowedTag[(thisCard*5) + 2]
-    && byte3 == allowedTag[(thisCard*5) + 3]
-    && byte4 == allowedTag[(thisCard*5) + 4])
+int findTag( char tagValue[10] ) {
+  for (int thisCard = 0; thisCard < numberOfTags; thisCard++) {
+    // Check if the tag value matches this row in the tag database
+    if(strcmp(tagValue, allowedTags[thisCard]) == 0)
     {
       // The row in the database starts at 0, so add 1 to the result so
       // that the card ID starts from 1 instead (0 represents "no match")
       return(thisCard + 1);
     }
   }
-  // If we don't find the tag return 0 to show it was invalid:
+  // If we don't find the tag return a tag ID of 0 to show there was no match
   return(0);
 }
